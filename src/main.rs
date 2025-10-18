@@ -1,7 +1,8 @@
 use etherparse::{Ipv4Slice, UdpSlice};
 use windivert::prelude::*;
 
-fn main() {
+#[tokio::main]
+async fn main() {
 	const HEARTBEAT_SIZES: [usize; 3] = [12, 18, 63];
 
 	let Ok(divert) = WinDivert::<NetworkLayer>::network(
@@ -12,12 +13,15 @@ fn main() {
 		panic!("Failed to create WinDivert");
 	};
 
-	let handle = std::thread::spawn(move || {
+	let shutdown_handle = divert.shutdown_handle();
+
+	let handle = tokio::spawn(async move {
 		let mut buffer = [0u8; 1500];
 
 		println!("Start receiving packet");
 		loop {
-			match divert.recv(&mut buffer) {
+			let result = tokio::task::block_in_place(|| divert.recv(&mut buffer));
+			match result {
 				Ok(packet) => {
 					let Ok(ip) = Ipv4Slice::from_slice(&packet.data) else {
 						eprintln!("Failed to parse IP headers");
@@ -46,6 +50,15 @@ fn main() {
 		}
 	});
 
-	handle.join().unwrap();
-	println!("shutting down...");
+	println!("Press Ctrl-C to exit.");
+
+	tokio::signal::ctrl_c().await.unwrap();
+
+	println!("Ctrl-C received! Exiting gracefully.");
+
+	shutdown_handle
+		.shutdown()
+		.expect("Failed to shutdown WinDivert");
+
+	handle.await.unwrap();
 }
