@@ -1,64 +1,55 @@
-use etherparse::{Ipv4Slice, UdpSlice};
-use windivert::prelude::*;
+//! # LobbyGuard CLI
+//!
+//! Command-line interface for packet capture and filtering.
+//!
+//! ## Usage
+//!
+//! Run with administrator privileges:
+//! ```bash
+//! cargo run --release
+//! ```
+//!
+//! Press Ctrl-C to exit gracefully.
 
-#[tokio::main]
-async fn main() {
-	const HEARTBEAT_SIZES: [usize; 3] = [12, 18, 63];
+use compio::signal::ctrl_c;
+use lobbyguard_core::capture::PacketCapture;
+use lobbyguard_core::Result;
+use snafu::report;
 
-	let Ok(divert) = WinDivert::<NetworkLayer>::network(
-		"udp.DstPort == 6672 and udp.PayloadLength > 0 and ip",
-		0,
-		Default::default(),
-	) else {
-		panic!("Failed to create WinDivert");
-	};
+/// Main entry point for CLI application
+#[report]
+#[compio::main]
+async fn main() -> Result<()> {
+    println!("LobbyGuard CLI - Packet Capture System");
+    println!("Make sure this is run with administrator privileges!");
+    println!("Press Ctrl-C to exit.\n");
 
-	let shutdown_handle = divert.shutdown_handle();
+    // Create packet capture instance
+    let mut capture = PacketCapture::new()?;
+    let shutdown_handle = capture.shutdown_handle();
 
-	let handle = tokio::spawn(async move {
-		let mut buffer = [0u8; 1500];
+    // Setup graceful shutdown on Ctrl-C
+    let ctrl_c_task = compio::runtime::spawn(async {
+        ctrl_c().await.ok();
+        println!("\nCtrl-C received! Shutting down gracefully...");
+    });
 
-		println!("Start receiving packet");
-		loop {
-			let result = tokio::task::block_in_place(|| divert.recv(&mut buffer));
-			match result {
-				Ok(packet) => {
-					let Ok(ip) = Ipv4Slice::from_slice(&packet.data) else {
-						eprintln!("Failed to parse IP headers");
-						continue;
-					};
-					let Ok(udp) = UdpSlice::from_slice(&ip.payload().payload) else {
-						eprintln!("Failed to parse UDP headers");
-						continue;
-					};
+    // Run packet capture in background
+    let capture_task = compio::runtime::spawn(async move {
+        if let Err(e) = capture.run().await {
+            eprintln!("Capture error: {}", e);
+        }
+    });
 
-					let payload = udp.payload();
-					let size = payload.len();
+    // Wait for Ctrl-C
+    ctrl_c_task.await.unwrap_or_else(|e| std::panic::resume_unwind(e));
 
-					if HEARTBEAT_SIZES.iter().any(|&x| x == size) {
-						println!("HEARTBEAT PACKET PASSED [{:?}]", size);
-						divert.send(&packet).expect("Failed to send packet");
-					}
-				}
-				Err(WinDivertError::Recv(WinDivertRecvError::NoData)) => {
-					break;
-				}
-				Err(e) => {
-					eprintln!("Error receiving packet: {}", e);
-				}
-			}
-		}
-	});
+    // Shutdown WinDivert
+    shutdown_handle.shutdown().ok();
 
-	println!("Press Ctrl-C to exit.");
+    // Wait for capture task to finish
+    capture_task.await.unwrap_or_else(|e| std::panic::resume_unwind(e));
 
-	tokio::signal::ctrl_c().await.unwrap();
-
-	println!("Ctrl-C received! Exiting gracefully.");
-
-	shutdown_handle
-		.shutdown()
-		.expect("Failed to shutdown WinDivert");
-
-	handle.await.unwrap();
+    println!("LobbyGuard CLI exited successfully.");
+    Ok(())
 }

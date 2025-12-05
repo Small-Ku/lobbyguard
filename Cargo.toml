@@ -1,5 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-    "lobbyguard-cli", "lobbyguard-gui",
+    "lobbyguard-core",
+    "lobbyguard-cli",
+    "lobbyguard-gui",
 ]
