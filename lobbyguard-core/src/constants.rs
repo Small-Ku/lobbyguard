@@ -15,8 +15,8 @@ pub const MAX_PACKET_SIZE: usize = 1500;
 /// WinDivert filter string for capturing relevant packets
 /// Filters for UDP packets destined to TARGET_UDP_PORT with payload
 pub fn divert_filter() -> String {
-    format!(
-        "udp.DstPort == {} and udp.PayloadLength > 0 and ip",
-        TARGET_UDP_PORT
-    )
+	format!(
+		"udp.DstPort == {} and udp.PayloadLength > 0 and ip",
+		TARGET_UDP_PORT
+	)
 }

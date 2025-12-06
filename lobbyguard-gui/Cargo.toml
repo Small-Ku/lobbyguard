@@ -7,4 +7,5 @@ edition = "2024"
 lobbyguard-core = { path = "../lobbyguard-core" }
 winio = { git = "https://github.com/compio-rs/winio.git", default-features = false, features = ["winui"] }
 snafu = "0.8.9"
-compio = "0.17.0"
+compio = { version = "0.17.0", features = ["time"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }

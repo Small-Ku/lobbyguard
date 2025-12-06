@@ -13,3 +13,4 @@ compio = { version = "0.17", features = [
     "signal",
     "dispatcher"
 ] }
+epserde = "0.11"

@@ -45,11 +45,37 @@ pub enum Error {
 
 	/// Failed to parse UDP packet headers
 	#[snafu(display("Failed to parse UDP packet headers"))]
-	UdpParseFailed{
-		source: etherparse::err::LenError,
-	},
+	UdpParseFailed { source: etherparse::err::LenError },
 
 	/// Packet capture was interrupted
 	#[snafu(display("Packet capture was interrupted: no data"))]
 	CaptureInterrupted,
+
+	/// Failed to open storage file
+	#[snafu(display("Failed to open storage file: {source}"))]
+	StorageOpen { source: std::io::Error },
+
+	/// Failed to write to storage file
+	#[snafu(display("Failed to write to storage file: {source}"))]
+	StorageWrite { source: std::io::Error },
+
+	/// Failed to read from storage file
+	#[snafu(display("Failed to read from storage file: {source}"))]
+	StorageRead { source: std::io::Error },
+
+	/// Failed to delete storage file
+	#[snafu(display("Failed to delete storage file: {source}"))]
+	StorageDelete { source: std::io::Error },
+
+	/// Failed to serialize packet data
+	#[snafu(display("Failed to serialize packet data: {source}"))]
+	Serialize {
+		source: Box<dyn std::error::Error + Send + Sync>,
+	},
+
+	/// Failed to deserialize packet data
+	#[snafu(display("Failed to deserialize packet data: {source}"))]
+	Deserialize {
+		source: Box<dyn std::error::Error + Send + Sync>,
+	},
 }

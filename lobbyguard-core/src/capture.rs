@@ -13,6 +13,8 @@
 //! ```
 
 use crate::constants::{HEARTBEAT_SIZES, MAX_PACKET_SIZE};
+use crate::packet_data::{CapturedPacket, PacketCapture as PacketCaptureSession};
+use crate::storage::CaptureStorage;
 use crate::{Error, error};
 use etherparse::{Ipv4Slice, UdpSlice};
 use snafu::ResultExt;
@@ -21,6 +23,10 @@ use windivert::prelude::*;
 /// Manages packet capture and filtering using WinDivert
 pub struct PacketCapture {
 	divert: WinDivert<NetworkLayer>,
+	/// Current capture session for storing packet data
+	session: PacketCaptureSession,
+	/// Optional storage for persisting captured packets
+	storage: Option<CaptureStorage>,
 }
 
 impl PacketCapture {
@@ -34,7 +40,22 @@ impl PacketCapture {
 		let divert = WinDivert::<NetworkLayer>::network(&filter, 0, Default::default())
 			.context(error::DivertCreationSnafu { filter })?;
 
-		Ok(Self { divert })
+		Ok(Self {
+			divert,
+			session: PacketCaptureSession::new(),
+			storage: None,
+		})
+	}
+
+	/// Creates a new PacketCapture with a specified storage file
+	///
+	/// # Errors
+	///
+	/// Returns an error if WinDivert fails to initialize or if admin rights are insufficient
+	pub fn with_storage(storage_path: impl Into<String>) -> crate::Result<Self> {
+		let mut capture = Self::new()?;
+		capture.storage = Some(CaptureStorage::new(storage_path));
+		Ok(capture)
 	}
 
 	/// Returns a shutdown handle for graceful termination
@@ -44,22 +65,36 @@ impl PacketCapture {
 
 	/// Processes a single packet, filtering for heartbeat packets
 	///
-	/// Returns `true` if the packet is a valid heartbeat and was forwarded
-	fn process_packet(&self, data: &[u8]) -> crate::Result<bool> {
+	/// Returns `(passed, src_ip, dst_ip, src_port, dst_port, protocol)`
+	fn process_packet(&self, data: &[u8]) -> crate::Result<(bool, String, String, u16, u16, u8)> {
 		let ip = Ipv4Slice::from_slice(data).context(error::IpParseFailedSnafu)?;
+		let header = ip.header();
+
+		let src_ip = {
+			let addr = header.source();
+			format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3])
+		};
+		let dst_ip = {
+			let addr = header.destination();
+			format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3])
+		};
 
 		let udp = UdpSlice::from_slice(&ip.payload().payload).context(error::UdpParseFailedSnafu)?;
 
+		let src_port = udp.source_port();
+		let dst_port = udp.destination_port();
 		let payload = udp.payload();
 		let size = payload.len();
+		let protocol = header.protocol().0 as u8;
 
 		// Check if this is a heartbeat packet
-		if HEARTBEAT_SIZES.iter().any(|&x| x == size) {
+		let passed = HEARTBEAT_SIZES.iter().any(|&x| x == size);
+
+		if passed {
 			log_heartbeat_packet(size);
-			Ok(true)
-		} else {
-			Ok(false)
 		}
+
+		Ok((passed, src_ip, dst_ip, src_port, dst_port, protocol))
 	}
 
 	/// Starts the packet capture loop
@@ -70,7 +105,7 @@ impl PacketCapture {
 	/// # Errors
 	///
 	/// Returns an error if packet reception or processing fails
-	pub async fn run(&mut self) -> crate::Result<()> {
+	pub fn run(&mut self) -> crate::Result<()> {
 		println!("Starting packet capture...");
 
 		let mut buffer = [0u8; MAX_PACKET_SIZE];
@@ -83,9 +118,26 @@ impl PacketCapture {
 						// Continue processing instead of stopping
 					}
 
-					// Forward heartbeat packets
-					if let Ok(true) = self.process_packet(&packet.data) {
-						self.divert.send(&packet).context(error::DivertSendSnafu)?;
+					// Process and store packet data
+					if let Ok((passed, src_ip, dst_ip, src_port, dst_port, protocol)) =
+						self.process_packet(&packet.data)
+					{
+						let captured = CapturedPacket::new(
+							packet.data.to_vec(),
+							passed,
+							src_ip,
+							dst_ip,
+							src_port,
+							dst_port,
+							protocol,
+						);
+
+						self.session.add_packet(captured);
+
+						// Forward heartbeat packets
+						if passed {
+							self.divert.send(&packet).context(error::DivertSendSnafu)?;
+						}
 					}
 				}
 				Err(WinDivertError::Recv(WinDivertRecvError::NoData)) => {
@@ -98,6 +150,37 @@ impl PacketCapture {
 				}
 			}
 		}
+	}
+
+	/// Gets a reference to the current capture session
+	pub fn session(&self) -> &PacketCaptureSession {
+		&self.session
+	}
+
+	/// Gets a mutable reference to the current capture session
+	pub fn session_mut(&mut self) -> &mut PacketCaptureSession {
+		&mut self.session
+	}
+
+	/// Consumes the capture and returns the session
+	pub fn into_session(self) -> PacketCaptureSession {
+		self.session
+	}
+
+	/// Saves the current capture session to storage
+	///
+	/// # Errors
+	///
+	/// Returns an error if storage is not configured or write fails
+	pub async fn save_session(&mut self) -> crate::Result<()> {
+		self.session.end_session();
+
+		if let Some(storage) = &self.storage {
+			storage.save_capture(&self.session).await?;
+			println!("Capture session saved to: {}", storage.path());
+		}
+
+		Ok(())
 	}
 
 	/// Shuts down the packet capture gracefully

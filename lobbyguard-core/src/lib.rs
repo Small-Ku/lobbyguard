@@ -20,5 +20,8 @@
 pub mod capture;
 pub mod constants;
 pub mod error;
+pub mod packet_data;
+pub mod storage;
 
 pub use error::{Error, Result};
+pub use windivert;
