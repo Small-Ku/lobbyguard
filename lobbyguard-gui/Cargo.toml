@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+lobbyguard-common = { path = "../lobbyguard-common" }
 xilem = "0.4"
 winit = "0.30.12"
 windivert = { version = ">=0.7.0-beta" }
 etherparse = "0.19.0"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
-# We'll move ServiceStatus to main.rs and remove lobbyguard-common dependency.
 

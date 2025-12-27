@@ -1398,9 +1398,18 @@ name = "lobbyguard-cli"
 version = "0.1.0"
 dependencies = [
  "etherparse 0.19.0",
+ "lobbyguard-common",
  "tokio",
  "windivert",
  "winres",
+]
+
+[[package]]
+name = "lobbyguard-common"
+version = "0.1.0"
+dependencies = [
+ "etherparse 0.19.0",
+ "windivert",
 ]
 
 [[package]]
@@ -1408,6 +1417,7 @@ name = "lobbyguard-gui"
 version = "0.1.0"
 dependencies = [
  "etherparse 0.19.0",
+ "lobbyguard-common",
  "tokio",
  "tokio-stream",
  "windivert",

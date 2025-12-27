@@ -2,5 +2,6 @@
 resolver = "3"
 members = [
     "lobbyguard-cli",
-    "lobbyguard-gui"
+    "lobbyguard-gui",
+    "lobbyguard-common"
 ]

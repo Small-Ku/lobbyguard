@@ -1,64 +1,52 @@
-use etherparse::{Ipv4Slice, UdpSlice};
-use windivert::prelude::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use lobbyguard_common::GuardEngine;
+use tokio::time::interval;
 
 #[tokio::main]
 async fn main() {
-	const HEARTBEAT_SIZES: [usize; 3] = [12, 18, 63];
-
-	let Ok(divert) = WinDivert::<NetworkLayer>::network(
-		"udp.DstPort == 6672 and udp.PayloadLength > 0 and ip",
-		0,
-		Default::default(),
-	) else {
-		panic!("Failed to create WinDivert");
+	let engine = match GuardEngine::start() {
+		Ok(e) => Arc::new(e),
+		Err(e) => {
+			eprintln!("Failed to start GuardEngine: {}", e);
+			return;
+		}
 	};
 
-	let shutdown_handle = divert.shutdown_handle();
+	let blocked_count = Arc::new(AtomicU64::new(0));
+	let engine_run = engine.clone();
+	let blocked_count_run = blocked_count.clone();
 
 	let handle = tokio::spawn(async move {
-		let mut buffer = [0u8; 1500];
-
-		println!("Start receiving packet");
-		loop {
-			let result = tokio::task::block_in_place(|| divert.recv(&mut buffer));
-			match result {
-				Ok(packet) => {
-					let Ok(ip) = Ipv4Slice::from_slice(&packet.data) else {
-						eprintln!("Failed to parse IP headers");
-						continue;
-					};
-					let Ok(udp) = UdpSlice::from_slice(&ip.payload().payload) else {
-						eprintln!("Failed to parse UDP headers");
-						continue;
-					};
-
-					let payload = udp.payload();
-					let size = payload.len();
-
-					if HEARTBEAT_SIZES.iter().any(|&x| x == size) {
-						println!("HEARTBEAT PACKET PASSED [{:?}]", size);
-						divert.send(&packet).expect("Failed to send packet");
-					}
-				}
-				Err(WinDivertError::Recv(WinDivertRecvError::NoData)) => {
-					break;
-				}
-				Err(e) => {
-					eprintln!("Error receiving packet: {}", e);
-				}
-			}
-		}
+		println!("LobbyGuard CLI started. Monitoring traffic...");
+		tokio::task::block_in_place(|| engine_run.run(blocked_count_run));
+		println!("GuardEngine stopped.");
 	});
+
+	let mut stats_interval = interval(Duration::from_secs(5));
+	let blocked_count_stats = blocked_count.clone();
 
 	println!("Press Ctrl-C to exit.");
 
-	tokio::signal::ctrl_c().await.unwrap();
+	loop {
+		tokio::select! {
+				_ = tokio::signal::ctrl_c() => {
+						println!("\nCtrl-C received! Exiting gracefully.");
+						break;
+				}
+				_ = stats_interval.tick() => {
+						let count = blocked_count_stats.load(Ordering::Relaxed);
+						println!("Status: Active | Blocked Packets: {}", count);
+				}
+		}
+	}
 
-	println!("Ctrl-C received! Exiting gracefully.");
+	if let Err(e) = engine.shutdown() {
+		eprintln!("Failed to shutdown GuardEngine: {}", e);
+	}
 
-	shutdown_handle
-		.shutdown()
-		.expect("Failed to shutdown WinDivert");
-
-	handle.await.unwrap();
+	let _ = handle.await;
+	println!("Goodbye!");
 }
