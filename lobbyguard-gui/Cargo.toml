@@ -13,4 +13,5 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
+parking_lot = "0.12"
+kanal = "0.1.1"

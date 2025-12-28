@@ -13,3 +13,6 @@ serde = { version = "1.0", features = ["derive"] }
 futures = "0.3"
 tokio = { version = "1.41", features = ["full"] }
 tracing = "0.1"
+parking_lot = "0.12"
+kanal = "0.1.1"
+
