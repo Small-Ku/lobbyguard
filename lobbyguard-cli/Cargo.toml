@@ -9,6 +9,8 @@ lobbyguard-common = { path = "../lobbyguard-common" }
 etherparse = "0.19.0"
 windivert = { version = ">=0.7.0-beta" }
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [build-dependencies]
 winres = "0.1"

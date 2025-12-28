@@ -4,13 +4,19 @@ use std::time::Duration;
 
 use lobbyguard_common::GuardEngine;
 use tokio::time::interval;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+	tracing_subscriber::fmt()
+		.with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
+		.init();
+
 	let engine = match GuardEngine::start() {
 		Ok(e) => Arc::new(e),
 		Err(e) => {
-			eprintln!("Failed to start GuardEngine: {}", e);
+			error!("Failed to start GuardEngine: {}", e);
 			return;
 		}
 	};
@@ -20,33 +26,33 @@ async fn main() {
 	let blocked_count_run = blocked_count.clone();
 
 	let handle = tokio::spawn(async move {
-		println!("LobbyGuard CLI started. Monitoring traffic...");
+		info!("LobbyGuard CLI started. Monitoring traffic...");
 		tokio::task::block_in_place(|| engine_run.run(blocked_count_run));
-		println!("GuardEngine stopped.");
+		info!("GuardEngine stopped.");
 	});
 
 	let mut stats_interval = interval(Duration::from_secs(5));
 	let blocked_count_stats = blocked_count.clone();
 
-	println!("Press Ctrl-C to exit.");
+	info!("Press Ctrl-C to exit.");
 
 	loop {
 		tokio::select! {
 				_ = tokio::signal::ctrl_c() => {
-						println!("\nCtrl-C received! Exiting gracefully.");
+						info!("\nCtrl-C received! Exiting gracefully.");
 						break;
 				}
 				_ = stats_interval.tick() => {
 						let count = blocked_count_stats.load(Ordering::Relaxed);
-						println!("Status: Active | Blocked Packets: {}", count);
+						info!("Status: Active | Blocked Packets: {}", count);
 				}
 		}
 	}
 
 	if let Err(e) = engine.shutdown() {
-		eprintln!("Failed to shutdown GuardEngine: {}", e);
+		error!("Failed to shutdown GuardEngine: {}", e);
 	}
 
 	let _ = handle.await;
-	println!("Goodbye!");
+	info!("Goodbye!");
 }
