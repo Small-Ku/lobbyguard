@@ -107,7 +107,7 @@ async fn main() {
 					GuardEvent::PacketBlocked => {
 						blocked_count += 1;
 						// Throttle logging?
-						if blocked_count % 10 == 0 {
+						if blocked_count.is_multiple_of(10) {
 							info!("Guard: Blocked {} packets total", blocked_count);
 						}
 					}

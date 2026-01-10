@@ -72,93 +72,88 @@ impl PacketGuard {
 		let event_tx = self.event_tx.clone();
 
 		let mut buffer = [0u8; 1500];
-		loop {
-			match divert.recv(&mut buffer) {
-				Ok(packet) => {
-					let filter_mode = config.read().filter_mode;
-					let mut payload_len = 0;
-					if let Ok(ip) = etherparse::Ipv4Slice::from_slice(&packet.data) {
-						// Extract ports for both UDP and TCP to identify target flows
-						let (src_port, dst_port, is_udp) =
-							if let Ok(udp) = etherparse::UdpSlice::from_slice(ip.payload().payload) {
-								(udp.source_port(), udp.destination_port(), true)
-							} else if let Ok(tcp) = etherparse::TcpSlice::from_slice(ip.payload().payload) {
-								(tcp.source_port(), tcp.destination_port(), false)
-							} else {
-								(0, 0, false)
-							};
-
-						if src_port != 0 {
-							let key = FlowKey {
-								local_addr: IpAddr::V4(ip.header().source_addr().into()),
-								local_port: src_port,
-								remote_addr: IpAddr::V4(ip.header().destination_addr().into()),
-								remote_port: dst_port,
-							};
-							let rev_key = FlowKey {
-								local_addr: IpAddr::V4(ip.header().destination_addr().into()),
-								local_port: dst_port,
-								remote_addr: IpAddr::V4(ip.header().source_addr().into()),
-								remote_port: src_port,
-							};
-
-							// If NOT in our GTA flow map, and NOT in reverse map, it's irrelevant traffic (usually).
-							// HOWEVER, WinDivert filter should have already narrowed it down to port 6672 or similar if in Solo/Locked.
-							// But in Disconnect mode (filter="ip"), we catch everything.
-							// We only want to block GTA traffic.
-
-							// Wait, if filter is "ip", we get everything. We only want to block if it matches a GTA flow.
-							// The original logic was:
-							// if !gta_flows.contains_key(&key) && !gta_flows.contains_key(&rev_key) {
-							//     let _ = divert.send(&packet);
-							//     continue;
-							// }
-							// This logic assumes we ONLY care about flows we tracked.
-							// If we haven't tracked it (e.g. system traffic), we pass it.
-							if !gta_flows.is_empty()
-								&& !gta_flows.contains_key(&key)
-								&& !gta_flows.contains_key(&rev_key)
-							{
-								let _ = divert.send(&packet);
-								continue;
-							} else if filter_mode == FilterMode::Disconnect {
-								// It IS a GTA flow, and we are in Disconnect mode. Block it.
-								PacketGuard::notify_blocked(&event_tx);
-								continue;
-							}
-
-							if is_udp {
-								// Heartbeat and Matchmaking checks are only for UDP
-								if let Ok(udp) = etherparse::UdpSlice::from_slice(ip.payload().payload) {
-									payload_len = udp.payload().len();
-								}
-							}
-						}
-					}
-
-					// Decision logic based on filter mode
-					let should_pass = match filter_mode {
-						FilterMode::Solo => {
-							// Solo: Only allow heartbeat packets (sizes 12, 18, 63)
-							HEARTBEAT_SIZES.contains(&payload_len)
-						}
-						FilterMode::Locked => {
-							// Locked: Block matchmaking packets, allow everything else for GTA
-							!MATCHMAKING_SIZES.contains(&payload_len)
-						}
-						FilterMode::Disconnect => {
-							// Disconnect: Block all traffic associated with GTA processes
-							false
-						}
+		while let Ok(packet) = divert.recv(&mut buffer) {
+			let filter_mode = config.read().filter_mode;
+			let mut payload_len = 0;
+			if let Ok(ip) = etherparse::Ipv4Slice::from_slice(&packet.data) {
+				// Extract ports for both UDP and TCP to identify target flows
+				let (src_port, dst_port, is_udp) =
+					if let Ok(udp) = etherparse::UdpSlice::from_slice(ip.payload().payload) {
+						(udp.source_port(), udp.destination_port(), true)
+					} else if let Ok(tcp) = etherparse::TcpSlice::from_slice(ip.payload().payload) {
+						(tcp.source_port(), tcp.destination_port(), false)
+					} else {
+						(0, 0, false)
 					};
 
-					if should_pass {
+				if src_port != 0 {
+					let key = FlowKey {
+						local_addr: IpAddr::V4(ip.header().source_addr()),
+						local_port: src_port,
+						remote_addr: IpAddr::V4(ip.header().destination_addr()),
+						remote_port: dst_port,
+					};
+					let rev_key = FlowKey {
+						local_addr: IpAddr::V4(ip.header().destination_addr()),
+						local_port: dst_port,
+						remote_addr: IpAddr::V4(ip.header().source_addr()),
+						remote_port: src_port,
+					};
+
+					// If NOT in our GTA flow map, and NOT in reverse map, it's irrelevant traffic (usually).
+					// HOWEVER, WinDivert filter should have already narrowed it down to port 6672 or similar if in Solo/Locked.
+					// But in Disconnect mode (filter="ip"), we catch everything.
+					// We only want to block GTA traffic.
+
+					// Wait, if filter is "ip", we get everything. We only want to block if it matches a GTA flow.
+					// The original logic was:
+					// if !gta_flows.contains_key(&key) && !gta_flows.contains_key(&rev_key) {
+					//     let _ = divert.send(&packet);
+					//     continue;
+					// }
+					// This logic assumes we ONLY care about flows we tracked.
+					// If we haven't tracked it (e.g. system traffic), we pass it.
+					if !gta_flows.is_empty()
+						&& !gta_flows.contains_key(&key)
+						&& !gta_flows.contains_key(&rev_key)
+					{
 						let _ = divert.send(&packet);
-					} else {
+						continue;
+					} else if filter_mode == FilterMode::Disconnect {
+						// It IS a GTA flow, and we are in Disconnect mode. Block it.
 						PacketGuard::notify_blocked(&event_tx);
+						continue;
+					}
+
+					if is_udp {
+						// Heartbeat and Matchmaking checks are only for UDP
+						if let Ok(udp) = etherparse::UdpSlice::from_slice(ip.payload().payload) {
+							payload_len = udp.payload().len();
+						}
 					}
 				}
-				Err(_) => break,
+			}
+
+			// Decision logic based on filter mode
+			let should_pass = match filter_mode {
+				FilterMode::Solo => {
+					// Solo: Only allow heartbeat packets (sizes 12, 18, 63)
+					HEARTBEAT_SIZES.contains(&payload_len)
+				}
+				FilterMode::Locked => {
+					// Locked: Block matchmaking packets, allow everything else for GTA
+					!MATCHMAKING_SIZES.contains(&payload_len)
+				}
+				FilterMode::Disconnect => {
+					// Disconnect: Block all traffic associated with GTA processes
+					false
+				}
+			};
+
+			if should_pass {
+				let _ = divert.send(&packet);
+			} else {
+				PacketGuard::notify_blocked(&event_tx);
 			}
 		}
 	}

@@ -72,34 +72,31 @@ impl FlowMonitor {
 		let gta_pids_flow = self.gta_pids.clone();
 		let event_tx_flow = event_tx.clone();
 
-		tokio::task::spawn_blocking(move || loop {
-			match flow_divert.recv() {
-				Ok(packet) => {
-					let flow = packet.address;
+		tokio::task::spawn_blocking(move || {
+			while let Ok(packet) = flow_divert.recv() {
+				let flow = packet.address;
 
-					let key = FlowKey {
-						local_addr: normalize_ip(flow.local_address()),
-						local_port: flow.local_port(),
-						remote_addr: normalize_ip(flow.remote_address()),
-						remote_port: flow.remote_port(),
-					};
+				let key = FlowKey {
+					local_addr: normalize_ip(flow.local_address()),
+					local_port: flow.local_port(),
+					remote_addr: normalize_ip(flow.remote_address()),
+					remote_port: flow.remote_port(),
+				};
 
-					match flow.event() {
-						WinDivertEvent::FlowEstablished => {
-							if gta_pids_flow.contains_key(&flow.process_id()) {
-								gta_flows.insert(key, ());
-								let _ = event_tx_flow.send(MonitorEvent::FlowEstablished(key));
-							}
+				match flow.event() {
+					WinDivertEvent::FlowEstablished => {
+						if gta_pids_flow.contains_key(&flow.process_id()) {
+							gta_flows.insert(key, ());
+							let _ = event_tx_flow.send(MonitorEvent::FlowEstablished(key));
 						}
-						WinDivertEvent::FlowDeleted => {
-							if gta_flows.remove(&key).is_some() {
-								let _ = event_tx_flow.send(MonitorEvent::FlowDeleted(key));
-							}
-						}
-						_ => {}
 					}
+					WinDivertEvent::FlowDeleted => {
+						if gta_flows.remove(&key).is_some() {
+							let _ = event_tx_flow.send(MonitorEvent::FlowDeleted(key));
+						}
+					}
+					_ => {}
 				}
-				Err(_) => break,
 			}
 		});
 	}

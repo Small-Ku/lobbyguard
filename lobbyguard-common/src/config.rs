@@ -5,6 +5,13 @@ use std::sync::Arc;
 /// Matchmaking packet sizes to block in Locked mode.
 pub const MATCHMAKING_SIZES: [usize; 4] = [191, 207, 223, 239];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhitelistEntry {
+	pub id: u64,
+	pub name: String,
+	pub ip: String,
+}
+
 /// Filter mode: which session type to enforce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilterMode {
@@ -42,6 +49,8 @@ impl FilterMode {
 pub struct GuardConfig {
 	/// Executable names to monitor (case-insensitive).
 	pub executable_names: Vec<String>,
+	/// Trusted IP whitelist.
+	pub whitelist: Vec<WhitelistEntry>,
 	/// Filter mode for packet interception.
 	pub filter_mode: FilterMode,
 }
@@ -50,6 +59,7 @@ impl Default for GuardConfig {
 	fn default() -> Self {
 		Self {
 			executable_names: vec!["GTA5.exe".to_owned(), "GTA5_Enhanced.exe".to_owned()],
+			whitelist: Vec::new(),
 			filter_mode: FilterMode::default(),
 		}
 	}
