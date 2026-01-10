@@ -1,4 +1,4 @@
-use etherparse::{Ipv4Slice, UdpSlice};
+use etherparse::{SlicedPacket, TransportSlice};
 use windivert::prelude::*;
 
 #[tokio::main]
@@ -20,45 +20,51 @@ async fn main() {
 
 		println!("Start receiving packet");
 		loop {
-			let result = tokio::task::block_in_place(|| divert.recv(&mut buffer));
-			match result {
-				Ok(packet) => {
-					let Ok(ip) = Ipv4Slice::from_slice(&packet.data) else {
-						eprintln!("Failed to parse IP headers");
-						continue;
-					};
-					let Ok(udp) = UdpSlice::from_slice(&ip.payload().payload) else {
-						eprintln!("Failed to parse UDP headers");
-						continue;
-					};
-
-					let payload = udp.payload();
-					let size = payload.len();
-
-					if HEARTBEAT_SIZES.iter().any(|&x| x == size) {
-						println!("HEARTBEAT PACKET PASSED [{:?}]", size);
-						divert.send(&packet).expect("Failed to send packet");
-					}
+			let result = tokio::task::block_in_place(|| divert.recv_wait(&mut buffer, 0));
+			let packet = match result {
+				Ok(Some(packet)) => packet,
+				Ok(None) => {
+					continue;
 				}
 				Err(WinDivertError::Recv(WinDivertRecvError::NoData)) => {
 					break;
 				}
 				Err(e) => {
-					eprintln!("Error receiving packet: {}", e);
+					panic!("Error receiving packet: {}", e);
 				}
+			};
+
+			let Ok(ip) = SlicedPacket::from_ip(&packet.data) else {
+				unreachable!("Failed to parse IP headers");
+				// continue;
+			};
+			let Some(TransportSlice::Udp(udp)) = ip.transport else {
+				unreachable!("Failed to parse UDP headers");
+				// continue;
+			};
+
+			let payload = udp.payload();
+			let size = payload.len();
+
+			if HEARTBEAT_SIZES.contains(&size) {
+				println!("HEARTBEAT PACKET PASSED [L{:?}]", size);
+				divert.send(&packet).expect("Failed to send packet");
 			}
 		}
 	});
 
 	println!("Press Ctrl-C to exit.");
 
-	tokio::signal::ctrl_c().await.unwrap();
+	tokio::select! {
+	_ = handle => {
+		println!("Loop exit.");
+	}
+	_ = tokio::signal::ctrl_c() => {
+		println!("Ctrl-C received! Exiting gracefully.");
 
-	println!("Ctrl-C received! Exiting gracefully.");
-
-	shutdown_handle
-		.shutdown()
-		.expect("Failed to shutdown WinDivert");
-
-	handle.await.unwrap();
+		shutdown_handle
+			.shutdown()
+			.expect("Failed to shutdown WinDivert");
+		}
+	}
 }

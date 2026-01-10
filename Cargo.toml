@@ -1,5 +1,18 @@
+# This line needs to come before anything else in Cargo.toml
+cargo-features = ["codegen-backend"]
+
 [workspace]
 resolver = "3"
 members = [
     "lobbyguard-cli",
 ]
+
+[profile.dev]
+codegen-backend = "cranelift"
+
+[profile.release]
+opt-level = 'z'
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = "symbols"
