@@ -14,7 +14,7 @@ use fastrace::collector::{Config, ConsoleReporter};
 use futures::StreamExt;
 use log::{debug, error, info, trace, warn};
 use logforth::append;
-use logforth::record::{Level, LevelFilter};
+use logforth::filter::env_filter::EnvFilterBuilder;
 use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
 use pcap_file::{DataLink, Endianness, TsResolution};
 use serde::Deserialize;
@@ -26,6 +26,10 @@ struct Lobbyguard {
 	/// optional path to output captured traffic
 	#[argh(option, short = 'f')]
 	file: Option<PathBuf>,
+
+	/// whether to capture TCP traffic (ports 80 and 443)
+	#[argh(switch)]
+	capture_tcp: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -54,8 +58,8 @@ struct Process {
 #[derive(Deserialize, Debug)]
 #[serde(rename = "MSFT_NetTCPConnection")]
 struct NetTCPConnection {
-	#[serde(rename = "LocalAddress")]
-	local_address: String,
+	// #[serde(rename = "LocalAddress")]
+	// local_address: String,
 	#[serde(rename = "LocalPort")]
 	local_port: u16,
 	#[serde(rename = "RemoteAddress")]
@@ -110,8 +114,8 @@ async fn main() {
 	fastrace::set_reporter(ConsoleReporter, Config::default());
 	logforth::starter_log::builder()
 		.dispatch(|d| {
-			d.filter(LevelFilter::MoreSevereEqual(Level::Debug))
-				.append(append::Stderr::default())
+			d.filter(EnvFilterBuilder::from_default_env_or("info").build())
+				.append(append::Stdout::default())
 		})
 		.dispatch(|d| d.append(append::FastraceEvent::default()))
 		.apply();
@@ -119,8 +123,8 @@ async fn main() {
 	let args: Lobbyguard = argh::from_env();
 
 	let main_pid_set: Arc<DashSet<u32>> = Arc::new(DashSet::new());
-	// All addresses used by TCP connections
-	let main_tcp_map: Arc<DashMap<u32, Vec<SocketAddr>>> = Arc::new(DashMap::new());
+	// Remote addresses and local ports used by TCP connections
+	let main_tcp_map: Arc<DashMap<u32, Vec<(SocketAddr, u16)>>> = Arc::new(DashMap::new());
 	// Local ports used by UDP connections
 	let main_udp_map: Arc<DashMap<u32, Vec<u16>>> = Arc::new(DashMap::new());
 
@@ -130,34 +134,6 @@ async fn main() {
 
 	let Ok(standard_con) = wmi::WMIConnection::with_namespace_path("ROOT\\StandardCIMV2") else {
 		panic!("Failed to create WMI connection to ROOT\\StandardCIMV2.");
-	};
-
-	if let Ok(tcps) = standard_con.query::<NetTCPConnection>() {
-		let count = tcps.len();
-		debug!("Queried {} TCP connections from WMI", count);
-		for tcp in tcps {
-			let (Ok(local_addr), Ok(remote_addr)) =
-				(tcp.local_address.parse(), tcp.remote_address.parse())
-			else {
-				continue;
-			};
-			let mut entry = main_tcp_map.entry(tcp.owning_process).or_default();
-			entry.push(SocketAddr::new(local_addr, tcp.local_port));
-			entry.push(SocketAddr::new(remote_addr, tcp.remote_port));
-		}
-	} else {
-		panic!("Failed to query initial TCP connection info from WMI");
-	};
-
-	if let Ok(udps) = standard_con.query::<NetUDPEndpoint>() {
-		let count = udps.len();
-		debug!("Queried {} UDP endpoints from WMI", count);
-		for udp in udps {
-			let mut entry = main_udp_map.entry(udp.owning_process).or_default();
-			entry.push(udp.local_port);
-		}
-	} else {
-		panic!("Failed to query initial UDP endpoint info from WMI");
 	};
 
 	let mut filters = HashMap::new();
@@ -172,6 +148,38 @@ async fn main() {
 		}
 	} else {
 		panic!("Failed to query existing GTA processes from WMI");
+	};
+
+	if let Ok(tcps) = standard_con.query::<NetTCPConnection>() {
+		let count = tcps.len();
+		debug!("Queried {} TCP connections from WMI", count);
+		for tcp in tcps {
+			if main_pid_set.contains(&tcp.owning_process) {
+				let Ok(remote_addr) = tcp.remote_address.parse() else {
+					continue;
+				};
+				let mut entry = main_tcp_map.entry(tcp.owning_process).or_default();
+				entry.push((
+					SocketAddr::new(remote_addr, tcp.remote_port),
+					tcp.local_port,
+				));
+			}
+		}
+	} else {
+		panic!("Failed to query initial TCP connection info from WMI");
+	};
+
+	if let Ok(udps) = standard_con.query::<NetUDPEndpoint>() {
+		let count = udps.len();
+		debug!("Queried {} UDP endpoints from WMI", count);
+		for udp in udps {
+			if main_pid_set.contains(&udp.owning_process) {
+				let mut entry = main_udp_map.entry(udp.owning_process).or_default();
+				entry.push(udp.local_port);
+			}
+		}
+	} else {
+		panic!("Failed to query initial UDP endpoint info from WMI");
 	};
 
 	let mut filters = HashMap::new();
@@ -227,14 +235,18 @@ async fn main() {
 	const MATCHMAKING_SIZES: [usize; 4] = [191, 207, 223, 239];
 
 	// All possible ports specified from Rockstar support page
-	let net_filter = "(udp ?
-			((udp.SrcPort == 6672 or udp.DstPort == 6672 or
-				(udp.SrcPort >= 61455 and udp.SrcPort <= 61458) or
-				(udp.DstPort >= 61455 and udp.DstPort <= 61458)
-			) and udp.PayloadLength > 0)
-			: (tcp ? ((tcp.DstPort == 80 or tcp.DstPort == 443 or tcp.SrcPort == 80 or tcp.SrcPort == 443) and tcp.PayloadLength > 0)
-		: false))
-		and (ip or ipv6)";
+	let tcp_filter = if args.capture_tcp {
+		"or (tcp ? ((tcp.DstPort == 80 or tcp.DstPort == 443 or tcp.SrcPort == 80 or tcp.SrcPort == 443) and tcp.PayloadLength > 0) : false)"
+	} else {
+		""
+	};
+	let net_filter = format!(
+		"(udp ? ((udp.SrcPort == 6672 or udp.DstPort == 6672 or \
+		(udp.SrcPort >= 61455 and udp.SrcPort <= 61458) or \
+		(udp.DstPort >= 61455 and udp.DstPort <= 61458)) and udp.PayloadLength > 0) : false) {} \
+		and (ip or ipv6)",
+		tcp_filter
+	);
 	debug!("Creating network divert with filter: {}", net_filter);
 	let Ok(network_divert) = WinDivert::<NetworkLayer>::network(net_filter, 0, Default::default())
 	else {
@@ -358,10 +370,11 @@ async fn main() {
 					let is_process = pid_set.iter().any(|pid| {
 						tcp_map
 							.view(pid.key(), |_, addrs| {
-								addrs.iter().any(|addr| {
+								addrs.iter().any(|(addr, port)| {
 									let src = SocketAddr::new(src_addr, tcp.source_port());
 									let dst = SocketAddr::new(dst_addr, tcp.destination_port());
-									*addr == src || *addr == dst
+									(*addr == src && *port == tcp.destination_port())
+										|| (*addr == dst && *port == tcp.source_port())
 								})
 							})
 							.is_some()
@@ -430,39 +443,45 @@ async fn main() {
 			}
 			Some(Ok(event)) = udp_create_events.next() => {
 				let udp = event.target_instance;
-				trace!("UDP connection created for PID {:#?}", udp);
-				let mut entry = main_udp_map.entry(udp.owning_process).or_default();
-				entry.push(udp.local_port);
+				if main_pid_set.contains(&udp.owning_process) {
+					trace!("UDP connection created for PID {:#?}", udp);
+					let mut entry = main_udp_map.entry(udp.owning_process).or_default();
+					entry.push(udp.local_port);
+				}
 			}
 			Some(Ok(event)) = udp_delete_events.next() => {
 				let udp = event.target_instance;
-				trace!("UDP connection deleted for PID {:#?}", udp);
-				let mut entry = main_udp_map.entry(udp.owning_process).or_default();
-				entry.retain(|port| port != &udp.local_port);
+				if let Some(mut entry) = main_udp_map.get_mut(&udp.owning_process) {
+					trace!("UDP connection deleted for PID {:#?}", udp);
+					entry.retain(|port| port != &udp.local_port);
+				}
 			}
 			Some(Ok(event)) = tcp_create_events.next() => {
 				let tcp = event.target_instance;
-				trace!("TCP connection created for PID {:#?}", tcp);
-				let (Ok(local_addr), Ok(remote_addr)) =
-					(tcp.local_address.parse(), tcp.remote_address.parse())
-				else {
-					continue;
-				};
-				let mut entry = main_tcp_map.entry(tcp.owning_process).or_default();
-				entry.push(SocketAddr::new(local_addr, tcp.local_port));
-				entry.push(SocketAddr::new(remote_addr, tcp.remote_port));
+				if main_pid_set.contains(&tcp.owning_process) {
+					trace!("TCP connection created for PID {:#?}", tcp);
+					let Ok(remote_addr) =
+						tcp.remote_address.parse()
+					else {
+						continue;
+					};
+					let mut entry = main_tcp_map.entry(tcp.owning_process).or_default();
+					entry.push((SocketAddr::new(remote_addr, tcp.remote_port), tcp.local_port));
+				}
 			}
 			Some(Ok(event)) = tcp_delete_events.next() => {
 				let tcp = event.target_instance;
-				trace!("TCP connection deleted for PID {:#?}", tcp);
-				let (Ok(local_addr), Ok(remote_addr)) =
-					(tcp.local_address.parse(), tcp.remote_address.parse())
-				else {
-					continue;
-				};
-				let mut entry = main_tcp_map.entry(tcp.owning_process).or_default();
-				entry.retain(|addr| addr != &SocketAddr::new(local_addr, tcp.local_port));
-				entry.retain(|addr| addr != &SocketAddr::new(remote_addr, tcp.remote_port));
+				if let Some(mut entry) = main_tcp_map.get_mut(&tcp.owning_process) {
+					trace!("TCP connection deleted for PID {:#?}", tcp);
+					let Ok(remote_addr) =
+						tcp.remote_address.parse()
+					else {
+						continue;
+					};
+					entry.retain(|(addr, port)| {
+						*addr != SocketAddr::new(remote_addr, tcp.remote_port) || *port != tcp.local_port
+					});
+				}
 			}
 			_ = tokio::signal::ctrl_c() => {
 				info!("Ctrl-C received! Exiting gracefully.");
